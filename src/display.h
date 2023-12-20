@@ -6,6 +6,7 @@
 
 struct ClickEvent {
     bool clicked;
+    bool clocked;
     int x;
     int y;
 };

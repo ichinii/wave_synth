@@ -5,6 +5,7 @@
 #include <sstream>
 #include <memory>
 #include <vector>
+#include <chrono>
 
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
@@ -174,6 +175,11 @@ void display(int width, int height, UpdateFn update) {
         }
     };
 
+    using namespace std::chrono;
+    auto start_time = steady_clock::now();
+    const int print_fps_interval = 60;
+    int frame = 0;
+
     while (!glfwWindowShouldClose(window)) {
         // handle input
         glfwPollEvents();
@@ -188,7 +194,8 @@ void display(int width, int height, UpdateFn update) {
         double mousex, mousey;
         glfwGetCursorPos(window, &mousex, &mousey);
         bool clicked = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-        auto click_ev = ClickEvent { clicked, mousex, mousey };
+        bool clocked = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+        auto click_ev = ClickEvent { clicked, clocked, mousex, mousey };
 
         // draw the image using ray marching
         glm::vec4 *image = update(click_ev);
@@ -201,6 +208,19 @@ void display(int width, int height, UpdateFn update) {
         glBindTexture(GL_TEXTURE_2D, tex);
         glDrawArrays(GL_TRIANGLES, 0, 6);
         glfwSwapBuffers(window);
+
+        frame++;
+        if (frame == print_fps_interval) {
+            frame = 0;
+
+            auto time = steady_clock::now();
+            auto delta = duration_cast<milliseconds>(time - start_time).count() / 1000.0f;
+            auto fps = std::round(60.0f / delta);
+
+            std::cout << "fps: " << fps << std::endl;
+
+            start_time = time;
+        }
     }
 
     glfwTerminate();
