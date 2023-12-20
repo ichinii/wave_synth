@@ -15,7 +15,7 @@ struct ErrorPrinter {
         auto last = cudaGetLastError();
         if (last != cudaSuccess && last != err) {
             std::cout
-                << "catched cuda error before line (" << line << "): "
+                << "catched lost cuda error above line (" << line << "): "
                 << cudaGetErrorString(err) << std::endl;
 
         }

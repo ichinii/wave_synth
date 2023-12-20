@@ -18,16 +18,23 @@ void init(float* src) {
 }
 
 __global__
-void point_source(float* dst, float x, float t, float amp) {
+void point_source(float* dst, int x, float t, float amp) {
     int gid = threadIdx.x + blockIdx.x*blockDim.x;
     if (gid == x)
         dst[gid] = amp * sin(t);
 }
 
 __global__
+void wall(float* dst, int x) {
+    int gid = threadIdx.x + blockIdx.x*blockDim.x;
+    if (gid == x)
+        dst[gid] = 0.0f;
+}
+
+__global__
 void step(float* dst, float* src, float* prev_src) {
-    // const float dt = 0.95f;
-    // const float dx = 1.0f;
+    const float dt = 60.0f / 48000.0f;
+    const float dx = 1.0f;
     // const float speed = 1.0f;
 
     int width = blockDim.x*gridDim.x;
@@ -36,12 +43,14 @@ void step(float* dst, float* src, float* prev_src) {
 
     float self = src[index(0)];
     float prev_self = prev_src[index(0)];
-
     float left = src[index(-1)];
     float right = src[index(1)];
 
-    float next = 2.0f*self - prev_self + (right + left - 2.0f*self);
+    if (gid == 0) {
+        left = 0.0f;
+    }
 
+    float next = 2.0f*self - prev_self + (dt / dx) * (right + left - 2.0f*self);
     dst[gid] = next;
 }
 
@@ -90,22 +99,37 @@ int main() {
 
         display(width, height, [&] {
             static auto start_time = steady_clock::now();
-            auto time = steady_clock::now();
-            auto t = duration_cast<milliseconds>(time - start_time).count() / 1000.0f;
-            point_source<<<G, B>>>(src, N/4, t*2.0f + sin(t), 0.2f);
+            static auto frame = 0ul;
 
-            step<<<G, B>>>(dst, src, prev_src);
-            check_kernel();
+            for (int i = 0; i < 48000 / 60; ++i) {
+                auto t = frame / 48000.0f;
 
-            draw<<<G * height, B>>>(d_output, dst);
+                // auto time = steady_clock::now();
+                // auto t = duration_cast<milliseconds>(time - start_time).count() / 1000.0f;
+
+                if (frame < 48000) {
+                    point_source<<<G, B>>>(src, 1, t*2.0f, 1.0f - min(1.0f, frame / 48000.0f));
+                }
+                wall<<<G, B>>>(src, 0);
+                wall<<<G, B>>>(src, N-1);
+
+                step<<<G, B>>>(dst, src, prev_src);
+                check_kernel();
+
+                auto tmp = prev_src;
+                prev_src = src;
+                src = dst;
+                dst = tmp;
+
+                ++frame;
+            }
+
+            auto result = src;
+
+            draw<<<G * height, B>>>(d_output, result);
             check_kernel();
 
             check << cudaMemcpy(h_output.data(), d_output, S * sizeof(glm::vec4), cudaMemcpyDeviceToHost);
-
-            auto tmp = prev_src;
-            prev_src = src;
-            src = dst;
-            dst = tmp;
 
             return h_output.data();
         });
