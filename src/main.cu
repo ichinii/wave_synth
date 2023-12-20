@@ -5,7 +5,7 @@
 #include "display.h"
 #include "misc.h"
 
-constexpr int N = 1024;
+constexpr int N = 1024*3;
 constexpr int B = 128;
 constexpr int G = N/B;
 
@@ -32,10 +32,18 @@ void wall(float* dst, int x) {
 }
 
 __global__
+void impulse(float* dst, int x, float amp = 1.0f) {
+    int gid = threadIdx.x + blockIdx.x*blockDim.x;
+    if (gid == x)
+        dst[gid] = amp;
+}
+
+__global__
 void step(float* dst, float* src, float* prev_src) {
     const float dt = 60.0f / 48000.0f;
     const float dx = 1.0f;
-    // const float speed = 1.0f;
+    // const float speed = 0.001f;
+    const float speed = 1.0f;
 
     int width = blockDim.x*gridDim.x;
     int gid = threadIdx.x + blockIdx.x*blockDim.x;
@@ -50,7 +58,7 @@ void step(float* dst, float* src, float* prev_src) {
         left = 0.0f;
     }
 
-    float next = 2.0f*self - prev_self + (dt / dx) * (right + left - 2.0f*self);
+    float next = 2.0f*self - prev_self + (speed * dt / dx) * (right + left - 2.0f*self);
     dst[gid] = next;
 }
 
@@ -87,7 +95,7 @@ int main() {
 
     {
         int width = N;
-        int height = 256;
+        int height = 512;
         int S = width*height;
 
         glm::vec4* d_output;
@@ -97,7 +105,7 @@ int main() {
 
         using namespace std::chrono;
 
-        display(width, height, [&] {
+        display(width, height, [&] (ClickEvent ev) {
             static auto start_time = steady_clock::now();
             static auto frame = 0ul;
 
@@ -108,10 +116,15 @@ int main() {
                 // auto t = duration_cast<milliseconds>(time - start_time).count() / 1000.0f;
 
                 if (frame < 48000) {
-                    point_source<<<G, B>>>(src, 1, t*2.0f, 1.0f - min(1.0f, frame / 48000.0f));
+                    point_source<<<G, B>>>(src, 1, t*3.0f, 1.0f - min(1.0f, frame / 48000.0f));
                 }
                 wall<<<G, B>>>(src, 0);
                 wall<<<G, B>>>(src, N-1);
+
+                if (ev.clicked) {
+                    float amp = 1.0f - ev.y / static_cast<float>(height) * 2.0f;
+                    impulse<<<G, B>>>(src, ev.x, amp);
+                }
 
                 step<<<G, B>>>(dst, src, prev_src);
                 check_kernel();

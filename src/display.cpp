@@ -95,7 +95,7 @@ static GLuint createProgram(std::vector<shader_load_data_t> shader_load_data)
     return program;
 }
 
-void display(int width, int height, std::function<glm::vec4*()> update) {
+void display(int width, int height, UpdateFn update) {
     glm::ivec2 viewport { width, height };
 
     assert(glfwInit() == GLFW_TRUE);
@@ -154,6 +154,7 @@ void display(int width, int height, std::function<glm::vec4*()> update) {
             key == GLFW_KEY_Q
         ))
             glfwSetWindowShouldClose(window, true);
+
         int value = action == GLFW_PRESS ? 1 : (action == GLFW_RELEASE ? -1 : 0);
         if (value != 0)
             key_states.insert_or_assign(key, value);
@@ -183,8 +184,14 @@ void display(int width, int height, std::function<glm::vec4*()> update) {
         glfwGetWindowSize(window, &viewport.x, &viewport.y);
         glViewport(0, 0, viewport.x, viewport.y);
 
+        // click event
+        double mousex, mousey;
+        glfwGetCursorPos(window, &mousex, &mousey);
+        bool clicked = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+        auto click_ev = ClickEvent { clicked, mousex, mousey };
+
         // draw the image using ray marching
-        glm::vec4 *image = update();
+        glm::vec4 *image = update(click_ev);
         glBindTexture(GL_TEXTURE_2D, tex);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, viewport.x, viewport.y, 0, GL_RGBA, GL_FLOAT, image);
 

@@ -4,4 +4,11 @@
 
 #include <glm/glm.hpp>
 
-extern void display(int width, int height, std::function<glm::vec4*()> update);
+struct ClickEvent {
+    bool clicked;
+    int x;
+    int y;
+};
+
+using UpdateFn = std::function<glm::vec4*(ClickEvent)>;
+extern void display(int width, int height, UpdateFn update);
