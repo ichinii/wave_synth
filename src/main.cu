@@ -21,17 +21,11 @@ glm::ivec2 index_to_coord(int index) {
 }
 
 __global__
-void init(float* src) {
-    int gid = threadIdx.x + blockIdx.x*blockDim.x;
-    src[gid] = 0.0f;
-}
-
-__global__
 void point_source(float* dst, glm::ivec2 p, float t, float amp) {
     int gid = threadIdx.x + blockIdx.x*blockDim.x;
     auto coord = index_to_coord(gid);
     if (length(glm::vec2(p - coord)) < 10)
-        dst[gid] = amp * sin(t * pi);
+        dst[gid] = amp * sin(t * pi2);
 }
 
 __device__
@@ -69,11 +63,10 @@ void insert_walls(float* dst, bool* walls) {
 
 __global__
 void step(float* dst, float* src, float* prev_src) {
-    const float dt = 60.0f / 48000.0f;
+    const float speed = 0.5f;
+    const float dt = 1.0f;
     const float dx = 1.0f;
-    // const float speed = 0.05f;
-    const float speed = 1.0f;
-    static_assert(speed * dt / dx <= 1.0f);
+    static_assert(speed * dt / dx <= 0.5f);
 
     int gid = threadIdx.x + blockIdx.x*blockDim.x;
     auto index = [gid] (int offset) { return (gid + offset + N) % N; };
@@ -87,7 +80,10 @@ void step(float* dst, float* src, float* prev_src) {
     float top = src[index(W)];
 
     float next = 2.0f*self - prev_self + (speed * dt / dx) * (right + left - 2.0f*self + top + bottom - 2.0f*self);
-    dst[gid] = next;
+
+    const float damping = 1.0f;
+    // const float damping = 0.999f;
+    dst[gid] = next * damping;
 }
 
 __global__
@@ -112,119 +108,150 @@ float probe(float* result, glm::ivec2 coord) {
     return value;
 }
 
-int main() {
-    float* dst;
-    float* src;
-    float* prev_src;
-    bool* walls;
+void init_walls(bool* d_walls) {
+    wall_line<<<G, B>>>(d_walls, glm::ivec2(200, 200), glm::ivec2(400, 200), 10);
+    wall_line<<<G, B>>>(d_walls, glm::ivec2(400, 200), glm::ivec2(400, 400), 10);
 
-    check << cudaMalloc(&dst, N * sizeof(float));
-    check << cudaMalloc(&src, N * sizeof(float));
-    check << cudaMalloc(&prev_src, N * sizeof(float));
-    check << cudaMalloc(&walls, N * sizeof(bool));
+    wall_line<<<G, B>>>(d_walls, glm::ivec2(600, 200), glm::ivec2(800, 200), 1);
+    wall_line<<<G, B>>>(d_walls, glm::ivec2(600, 200), glm::ivec2(600, 300), 1);
+    wall_line<<<G, B>>>(d_walls, glm::ivec2(600, 300), glm::ivec2(800, 300), 1);
+    wall_line<<<G, B>>>(d_walls, glm::ivec2(800, 300), glm::ivec2(800, 210), 1);
 
-    init<<<G, B>>>(src);
-    check_kernel();
-    check << cudaMemcpy(prev_src, src, N * sizeof(float), cudaMemcpyDeviceToDevice);
-
-    wall_line<<<G, B>>>(walls, glm::ivec2(200, 200), glm::ivec2(400, 200), 10);
-    wall_line<<<G, B>>>(walls, glm::ivec2(400, 200), glm::ivec2(400, 400), 10);
-
-    wall_line<<<G, B>>>(walls, glm::ivec2(600, 200), glm::ivec2(800, 200), 1);
-    wall_line<<<G, B>>>(walls, glm::ivec2(600, 200), glm::ivec2(600, 300), 1);
-    wall_line<<<G, B>>>(walls, glm::ivec2(600, 300), glm::ivec2(800, 300), 1);
-    wall_line<<<G, B>>>(walls, glm::ivec2(800, 300), glm::ivec2(800, 210), 1);
-
-    wall_line<<<G, B>>>(walls, glm::ivec2(500, 50), glm::ivec2(900, 90), 1);
+    wall_line<<<G, B>>>(d_walls, glm::ivec2(500, 50), glm::ivec2(900, 90), 1);
 
     {
         int w = W-1;
         int h = H-1;
-        wall_line<<<G, B>>>(walls, glm::ivec2(0, 0), glm::ivec2(w, 0), 1); check_kernel();
-        wall_line<<<G, B>>>(walls, glm::ivec2(w, 0), glm::ivec2(w, h), 1); check_kernel();
-        wall_line<<<G, B>>>(walls, glm::ivec2(w, h), glm::ivec2(0, h), 1); check_kernel();
-        wall_line<<<G, B>>>(walls, glm::ivec2(0, h), glm::ivec2(0, 0), 1); check_kernel();
+        wall_line<<<G, B>>>(d_walls, glm::ivec2(0, 0), glm::ivec2(w, 0), 1); check_kernel();
+        wall_line<<<G, B>>>(d_walls, glm::ivec2(w, 0), glm::ivec2(w, h), 1); check_kernel();
+        wall_line<<<G, B>>>(d_walls, glm::ivec2(w, h), glm::ivec2(0, h), 1); check_kernel();
+        wall_line<<<G, B>>>(d_walls, glm::ivec2(0, h), glm::ivec2(0, 0), 1); check_kernel();
     }
+}
 
-    {
-        glm::vec4* d_output;
-        check << cudaMalloc(&d_output, N * sizeof(glm::vec4));
+int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
+    std::cout << "hello instrument!" << std::endl;
 
-        auto h_output = std::vector<glm::vec4>(N);
+    float* d_grid;
+    float* d_grid_prev;
+    float* d_grid_next;
+    check << cudaMalloc(&d_grid, N * sizeof(float));
+    check << cudaMalloc(&d_grid_prev, N * sizeof(float));
+    check << cudaMalloc(&d_grid_next, N * sizeof(float));
+    check << cudaMemset(d_grid, 0, N * sizeof(float));
+    check << cudaMemset(d_grid_prev, 0, N * sizeof(float));
 
-        using namespace std::chrono;
+    bool* d_walls;
+    check << cudaMalloc(&d_walls, N * sizeof(bool));
+    check << cudaMemset(d_walls, 0, N * sizeof(float));
+    init_walls(d_walls);
 
-        display(W, H, [&] (ClickEvent ev) {
-            static auto start_time = steady_clock::now();
-            static auto frame = 0ul;
+    auto h_output = std::vector<glm::vec4>(N);
+    glm::vec4* d_output;
+    check << cudaMalloc(&d_output, N * sizeof(glm::vec4));
 
-            for (int i = 0; i < 48000 / 60; ++i) {
-                auto t = frame / 48000.0f;
+    auto swap_buffers = [&] {
+        auto tmp = d_grid_prev;
+        d_grid_prev = d_grid;
+        d_grid = d_grid_next;
+        d_grid_next = tmp;
+        return d_grid; // return the results buffer
+    };
 
-                // auto time = steady_clock::now();
-                // auto t = duration_cast<milliseconds>(time - start_time).count() / 1000.0f;
+    constexpr int AudioSampleRate = 48000;
+    constexpr int AudioBufferSize = 128;
+    constexpr int AudioBufferPeriods = 2;
+    constexpr int AudioBuffersPerSecond = AudioSampleRate / AudioBufferSize;
+    static_assert(AudioBuffersPerSecond * AudioBufferSize == AudioSampleRate);
 
-                if (false && frame < 48000) {
-                    point_source<<<G, B>>>(
-                        src,
-                        glm::ivec2(100, 100),
-                        t * 55.0f,
-                        pow(1.0f - min(1.0f, frame / 48000.0f), 2.0f)
-                    );
-                    check_kernel();
-                }
+    constexpr int StepsPerAudioBuffer = 1;
+    constexpr int StepsPerSecond = StepsPerAudioBuffer * AudioBuffersPerSecond;
+    constexpr float SecondsPerStep = 1.0f / StepsPerSecond;
+    constexpr float PitchCorrectionFactor = AudioSampleRate;
 
-                // point_source<<<G, B>>>(src, glm::ivec2(100, 100), t*440.0f, 0.5f);
-                // check_kernel();
+    using namespace std::chrono;
+    using namespace std::chrono_literals;
+    auto start_time = steady_clock::now();
+    auto prev_step_time = 0ms;
+    auto steps = 0;
 
-                insert_walls<<<G, B>>>(src, walls);
+    glm::ivec2 wall_from = glm::ivec2(0, 0);
+
+    display(W, H, [&] (ClickEvent ev) {
+        auto time = steady_clock::now();
+        auto elapsed_time = time - start_time;
+
+        auto steps_todo = duration_cast<milliseconds>(
+            (elapsed_time - prev_step_time) * StepsPerSecond
+        ).count() / 1000;
+
+        for (int i = 0; i < steps_todo; ++i) {
+            auto t = steps / static_cast<float>(StepsPerSecond);
+
+            if (ev.clicked) {
+                impulse<<<G, B>>>(d_grid, glm::ivec2(ev.x, H - ev.y), 4.0f);
                 check_kernel();
-
-                if (ev.clicked) {
-                    // impulse<<<G, B>>>(src, glm::ivec2(ev.x, H - ev.y), 0.5f);
-                    point_source<<<G, B>>>(src, glm::ivec2(ev.x, H-ev.y), t*440.0f, 0.5f);
-                    check_kernel();
-                }
-
-                static glm::ivec2 from = glm::ivec2(0, 0);
-                if (ev.clocked) {
-                    auto to = glm::ivec2(ev.x, H-ev.y);
-                    if (from != glm::ivec2{0, 0}) {
-                        wall_line<<<G, B>>>(walls, from, to, 1); check_kernel();
-                        check_kernel();
-                    }
-                    from = to;
-                }
-
-                step<<<G, B>>>(dst, src, prev_src);
-                check_kernel();
-
-                auto tmp = prev_src;
-                prev_src = src;
-                src = dst;
-                dst = tmp;
-
-                ++frame;
             }
 
-            auto result = src;
+            if (ev.clocked) {
+                auto wall_to = glm::ivec2(ev.x, H-ev.y);
+                if (wall_from != glm::ivec2{0, 0}) {
+                    wall_line<<<G, B>>>(d_walls, wall_from, wall_to, 1); check_kernel();
+                    check_kernel();
+                }
+                wall_from = wall_to;
+            }
 
-            draw<<<G, B>>>(d_output, result, walls);
+            point_source<<<G, B>>>(d_grid, glm::ivec2(100, 100), t*2.0f, 0.5f);
             check_kernel();
 
-            check << cudaMemcpy(h_output.data(), d_output, N * sizeof(glm::vec4), cudaMemcpyDeviceToHost);
+            insert_walls<<<G, B>>>(d_grid, d_walls);
+            check_kernel();
 
-            // float amp = probe(result, glm::ivec2(50, 50));
-            // std::cout << amp << std::endl;
+            step<<<G, B>>>(d_grid_next, d_grid, d_grid_prev);
+            check_kernel();
 
-            return h_output.data();
-        });
+            swap_buffers();
+            ++steps;
+        }
 
-        check << cudaFree(d_output);
-    }
+        // TODO: this might not be accurate
+        prev_step_time += duration_cast<milliseconds>(
+            1us * steps_todo * static_cast<int>(1000000.0f * SecondsPerStep)
+        );
 
-    check << cudaFree(src);
-    check << cudaFree(dst);
+        draw<<<G, B>>>(d_output, d_grid, d_walls);
+        check_kernel();
+
+        check << cudaMemcpy(h_output.data(), d_output, N * sizeof(glm::vec4), cudaMemcpyDeviceToHost);
+
+        // float amp = probe(result, glm::ivec2(50, 50));
+        // std::cout << amp << std::endl;
+
+        return h_output.data();
+    });
+
+    check << cudaFree(d_output);
+
+    check << cudaFree(d_grid);
+    check << cudaFree(d_grid_next);
 
     return 0;
 }
+
+
+            // if (ev.clicked) {
+            //     impulse<<<G, B>>>(d_grid, glm::ivec2(ev.x, H - ev.y), 1.0f);
+            //     point_source<<<G, B>>>(d_grid, glm::ivec2(ev.x, H-ev.y), t * 0.1f, 0.5f);
+            //     check_kernel();
+            // }
+
+            // static glm::ivec2 from = glm::ivec2(0, 0);
+            // if (ev.clocked) {
+            //     auto to = glm::ivec2(ev.x, H-ev.y);
+            //     if (from != glm::ivec2{0, 0}) {
+            //         wall_line<<<G, B>>>(d_walls, from, to, 1); check_kernel();
+            //         check_kernel();
+            //     }
+            //     from = to;
+            // }
