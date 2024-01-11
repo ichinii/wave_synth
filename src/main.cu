@@ -1,7 +1,10 @@
 #include <iostream>
 #include <vector>
 #include <chrono>
+
 #include <glm/glm.hpp>
+#include <jack/jack.h>
+
 #include "display.h"
 #include "misc.h"
 
@@ -79,11 +82,13 @@ void step(float* dst, float* src, float* prev_src) {
     float bottom = src[index(-W)];
     float top = src[index(W)];
 
-    float next = 2.0f*self - prev_self + (speed * dt / dx) * (right + left - 2.0f*self + top + bottom - 2.0f*self);
+    float value = right + left + top + bottom - 4.0f*self;
+    value *= speed * dt / dx;
+    value += 2.0f*self - prev_self;
 
     const float damping = 1.0f;
     // const float damping = 0.999f;
-    dst[gid] = next * damping;
+    dst[gid] = value * damping;
 }
 
 __global__
@@ -101,10 +106,10 @@ void draw(glm::vec4* output, float* data, bool* walls) {
     output[gid] = c;
 }
 
-float probe(float* result, glm::ivec2 coord) {
+float probe(float* data, glm::ivec2 coord) {
     float value;
-    result += coord.x + coord.y * W;
-    cudaMemcpy(&value, result, sizeof(float), cudaMemcpyDeviceToHost);
+    data += coord.x + coord.y * W;
+    cudaMemcpy(&value, data, sizeof(float), cudaMemcpyDeviceToHost);
     return value;
 }
 
@@ -160,14 +165,19 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
 
     constexpr int AudioSampleRate = 48000;
     constexpr int AudioBufferSize = 128;
-    constexpr int AudioBufferPeriods = 2;
+    constexpr int ProbeStepSize = AudioBufferSize;
+
+    // constexpr int AudioBufferPeriods = 2;
     constexpr int AudioBuffersPerSecond = AudioSampleRate / AudioBufferSize;
     static_assert(AudioBuffersPerSecond * AudioBufferSize == AudioSampleRate);
 
-    constexpr int StepsPerAudioBuffer = 1;
-    constexpr int StepsPerSecond = StepsPerAudioBuffer * AudioBuffersPerSecond;
+    // the audio buffer size must be a multiple of sample step size
+    static_assert(AudioBufferSize / ProbeStepSize > 0);
+    static_assert(AudioBufferSize % ProbeStepSize == 0);
+
+    constexpr int StepsPerSecond = (AudioBufferSize / ProbeStepSize) * AudioBuffersPerSecond;
     constexpr float SecondsPerStep = 1.0f / StepsPerSecond;
-    constexpr float PitchCorrectionFactor = AudioSampleRate;
+    // constexpr float PitchCorrectionFactor = AudioSampleRate;
 
     using namespace std::chrono;
     using namespace std::chrono_literals;
@@ -177,6 +187,52 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
 
     glm::ivec2 wall_from = glm::ivec2(0, 0);
 
+    float prev_amp = 0.0f;
+    float buffer[AudioBufferSize];
+    int buffer_index = 0;
+
+    jack_status_t status;
+    auto client = jack_client_open("wavy_synth", JackNoStartServer, &status);
+    std::cout << "jack status: " << (status ? "error" : "ok") << std::endl;
+    assert(!status);
+    auto input_port = jack_port_register(
+        client,
+        "inputxx",
+        JACK_DEFAULT_AUDIO_TYPE,
+        JackPortIsInput,
+        AudioBufferSize
+    );
+    auto output_port = jack_port_register(
+        client,
+        "outputxx",
+        JACK_DEFAULT_AUDIO_TYPE,
+        JackPortIsOutput,
+        AudioBufferSize
+    );
+    assert(input_port);
+    assert(output_port);
+    struct Ports {
+        jack_port_t* input;
+        jack_port_t* output;
+        float* buffer;
+    } ports {
+        input_port,
+        output_port,
+        buffer,
+    };
+    auto process = [] (jack_nframes_t nframes, void* arg) -> int {
+        assert(nframes == AudioBufferSize);
+        auto ports = static_cast<Ports*>(arg);
+        float* input = static_cast<float*>(jack_port_get_buffer(ports->input, AudioBufferSize));
+        float* output = static_cast<float*>(jack_port_get_buffer(ports->output, AudioBufferSize));
+        for (int i = 0; i < AudioBufferSize; ++i) {
+            output[i] = ports->buffer[i];
+        }
+        return 0;
+    };
+    jack_set_process_callback(client, process, &ports);
+    jack_activate(client);
+
     display(W, H, [&] (ClickEvent ev) {
         auto time = steady_clock::now();
         auto elapsed_time = time - start_time;
@@ -184,6 +240,8 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
         auto steps_todo = duration_cast<milliseconds>(
             (elapsed_time - prev_step_time) * StepsPerSecond
         ).count() / 1000;
+
+        // std::cout << "steps todo: " << steps_todo << std::endl;
 
         for (int i = 0; i < steps_todo; ++i) {
             auto t = steps / static_cast<float>(StepsPerSecond);
@@ -202,7 +260,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
                 wall_from = wall_to;
             }
 
-            point_source<<<G, B>>>(d_grid, glm::ivec2(100, 100), t*2.0f, 0.5f);
+            point_source<<<G, B>>>(d_grid, glm::ivec2(100, 100), t*2.0f, max(0.0f, 1.0f - t*0.5f));
             check_kernel();
 
             insert_walls<<<G, B>>>(d_grid, d_walls);
@@ -210,6 +268,18 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
 
             step<<<G, B>>>(d_grid_next, d_grid, d_grid_prev);
             check_kernel();
+
+            float amp = probe(d_grid, glm::ivec2(50, 50));
+            for (int i = 0; i < ProbeStepSize; ++i)
+                buffer[buffer_index++] = glm::mix(prev_amp, amp, static_cast<float>(i) / ProbeStepSize);
+            prev_amp = amp;
+
+            // flush
+            if (buffer_index == AudioBufferSize) {
+                // TODO: send buffer to jack
+                // std::cout << amp << std::endl;
+                buffer_index = 0;
+            }
 
             swap_buffers();
             ++steps;
@@ -224,9 +294,6 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
         check_kernel();
 
         check << cudaMemcpy(h_output.data(), d_output, N * sizeof(glm::vec4), cudaMemcpyDeviceToHost);
-
-        // float amp = probe(result, glm::ivec2(50, 50));
-        // std::cout << amp << std::endl;
 
         return h_output.data();
     });
