@@ -47,6 +47,7 @@ AddTool(function(s)
     table.insert(s.cu.flags_link, "GLEW")
     table.insert(s.cu.flags_link, "glfw")
     table.insert(s.cu.flags_link, "jack")
+    table.insert(s.cu.flags_link, "cufftw")
     s.cu.flags = {}
     s.name = "default"
 

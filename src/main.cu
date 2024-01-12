@@ -4,11 +4,12 @@
 
 #include <glm/glm.hpp>
 #include <jack/jack.h>
+#include <fftw3.h>
 
 #include "display.h"
 #include "misc.h"
 
-constexpr int W = 1024;
+constexpr int W = 512;
 constexpr int H = 512;
 constexpr int N = W*H;
 
@@ -86,8 +87,8 @@ void step(float* dst, float* src, float* prev_src) {
     value *= speed * dt / dx;
     value += 2.0f*self - prev_self;
 
-    const float damping = 1.0f;
-    // const float damping = 0.999f;
+    // const float damping = 1.0f;
+    const float damping = 0.99f;
     dst[gid] = value * damping;
 }
 
@@ -103,26 +104,75 @@ void draw(glm::vec4* output, float* data, bool* walls) {
     if (walls[gid])
         c = glm::vec4(1);
 
+    c = glm::vec4(glm::pow(glm::vec3(c), glm::vec3(1.0f/2.2f)), c.a);
+
     output[gid] = c;
 }
 
-float probe(float* data, glm::ivec2 coord) {
+// run with BlockSize = AudioBufferSize
+void pitch_shift(int n, float* data) {
+    auto convert = [n] (auto* dst, auto* src) {
+        for (int i = 0; i < n; ++i)
+            dst[i] = src[i];
+    };
+
+    auto r = (double*) fftw_malloc(sizeof(double) * n);
+    convert(r, data);
+
+    auto c = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * n);
+
+    fftw_plan r2c = fftw_plan_dft_r2c_1d(
+        n,
+        r,
+        c,
+        0 // flags
+    );
+
+    fftw_execute(r2c);
+
+    for (int i = n-1; i >= 0; --i) {
+        c[i][0] = 0.5f * c[i/8][0] + 0.25f * c[i/16][0];
+        c[i][1] = 0.5f * c[i/8][1] + 0.25f * c[i/16][1];
+    }
+
+    fftw_plan c2r = fftw_plan_dft_c2r_1d(
+        n,
+        c,
+        r,
+        0 // flags
+    );
+
+    fftw_execute(c2r);
+
+    convert(data, r);
+
+    for (int i = 0; i < n; ++i) {
+        data[i] *= 0.01f;
+    }
+
+    fftw_destroy_plan(c2r);
+    fftw_destroy_plan(r2c);
+    fftw_free(r);
+    fftw_free(c);
+}
+
+float probe(float* data, glm::ivec2 coord, cudaStream_t stream = 0) {
     float value;
     data += coord.x + coord.y * W;
-    cudaMemcpy(&value, data, sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpyAsync(&value, data, sizeof(float), cudaMemcpyDeviceToHost, stream);
     return value;
 }
 
 void init_walls(bool* d_walls) {
-    wall_line<<<G, B>>>(d_walls, glm::ivec2(200, 200), glm::ivec2(400, 200), 10);
-    wall_line<<<G, B>>>(d_walls, glm::ivec2(400, 200), glm::ivec2(400, 400), 10);
+    // wall_line<<<G, B>>>(d_walls, glm::ivec2(200, 200), glm::ivec2(400, 200), 10);
+    // wall_line<<<G, B>>>(d_walls, glm::ivec2(400, 200), glm::ivec2(400, 400), 10);
 
-    wall_line<<<G, B>>>(d_walls, glm::ivec2(600, 200), glm::ivec2(800, 200), 1);
-    wall_line<<<G, B>>>(d_walls, glm::ivec2(600, 200), glm::ivec2(600, 300), 1);
-    wall_line<<<G, B>>>(d_walls, glm::ivec2(600, 300), glm::ivec2(800, 300), 1);
-    wall_line<<<G, B>>>(d_walls, glm::ivec2(800, 300), glm::ivec2(800, 210), 1);
+    // wall_line<<<G, B>>>(d_walls, glm::ivec2(600, 200), glm::ivec2(800, 200), 1);
+    // wall_line<<<G, B>>>(d_walls, glm::ivec2(600, 200), glm::ivec2(600, 300), 1);
+    // wall_line<<<G, B>>>(d_walls, glm::ivec2(600, 300), glm::ivec2(800, 300), 1);
+    // wall_line<<<G, B>>>(d_walls, glm::ivec2(800, 300), glm::ivec2(800, 210), 1);
 
-    wall_line<<<G, B>>>(d_walls, glm::ivec2(500, 50), glm::ivec2(900, 90), 1);
+    // wall_line<<<G, B>>>(d_walls, glm::ivec2(500, 50), glm::ivec2(900, 90), 1);
 
     {
         int w = W-1;
@@ -163,33 +213,152 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
         return d_grid; // return the results buffer
     };
 
-    constexpr int AudioSampleRate = 48000;
-    constexpr int AudioBufferSize = 128;
-    constexpr int ProbeStepSize = AudioBufferSize;
+    constexpr int AudioSampleRate = 44100;
+    constexpr int AudioBufferSize = 512;
+    // static_assert(AudioSampleRate % AudioBufferSize == 0);
 
+    constexpr int ProbeStepSize = AudioBufferSize;
     // constexpr int AudioBufferPeriods = 2;
     constexpr int AudioBuffersPerSecond = AudioSampleRate / AudioBufferSize;
-    static_assert(AudioBuffersPerSecond * AudioBufferSize == AudioSampleRate);
+    // static_assert(AudioBuffersPerSecond * AudioBufferSize == AudioSampleRate);
 
     // the audio buffer size must be a multiple of sample step size
     static_assert(AudioBufferSize / ProbeStepSize > 0);
     static_assert(AudioBufferSize % ProbeStepSize == 0);
 
     constexpr int StepsPerSecond = (AudioBufferSize / ProbeStepSize) * AudioBuffersPerSecond;
-    constexpr float SecondsPerStep = 1.0f / StepsPerSecond;
+    // constexpr float SecondsPerStep = 1.0f / StepsPerSecond;
     // constexpr float PitchCorrectionFactor = AudioSampleRate;
 
     using namespace std::chrono;
     using namespace std::chrono_literals;
     auto start_time = steady_clock::now();
-    auto prev_step_time = 0ms;
-    auto steps = 0;
+    // auto prev_step_time = 0ms;
+    // auto steps = 0;
 
     glm::ivec2 wall_from = glm::ivec2(0, 0);
 
-    float prev_amp = 0.0f;
+    constexpr int AA = 64;
+    constexpr int Amps = AudioBufferSize / AA;
+    std::vector<float> amps(0.0f, Amps+2);
+    int prev_amps_start = 0;
     float buffer[AudioBufferSize];
-    int buffer_index = 0;
+
+    cudaStream_t process_stream;
+    cudaStream_t display_stream;
+    cudaStreamCreate(&process_stream);
+    cudaStreamCreate(&display_stream);
+    ClickEvent click;
+
+    auto simulate = [&, prev_amp = 0.0f, start_sample = 0] () mutable -> float* {
+        cudaStreamSynchronize(display_stream);
+
+        float t = static_cast<float>(start_sample) / AudioSampleRate;
+
+        if (click.clicked) {
+            // impulse<<<G, B, 0, process_stream>>>(d_grid, glm::ivec2(click.x, H - click.y), 4.0f);
+            point_source<<<G, B, 0, process_stream>>>(
+                d_grid,
+                glm::ivec2(click.x, H - click.y),
+                t*14.1f,
+                0.4f
+            );
+            check_kernel();
+        }
+
+        if (click.a) {
+            // impulse<<<G, B, 0, process_stream>>>(d_grid, glm::ivec2(click.x, H - click.y), 4.0f);
+            point_source<<<G, B, 0, process_stream>>>(
+                d_grid,
+                glm::ivec2(click.x, H - click.y),
+                t*1.0f,
+                0.35f
+            );
+            check_kernel();
+        }
+
+        if (click.b) {
+            // impulse<<<G, B, 0, process_stream>>>(d_grid, glm::ivec2(click.x, H - click.y), 4.0f);
+            point_source<<<G, B, 0, process_stream>>>(
+                d_grid,
+                glm::ivec2(click.x, H - click.y),
+                t*3.0f,
+                0.35f
+            );
+            check_kernel();
+        }
+
+        if (click.c) {
+            // impulse<<<G, B, 0, process_stream>>>(d_grid, glm::ivec2(click.x, H - click.y), 4.0f);
+            point_source<<<G, B, 0, process_stream>>>(
+                d_grid,
+                glm::ivec2(click.x, H - click.y),
+                t*5.0f,
+                0.35f
+            );
+            check_kernel();
+        }
+
+        if (click.d) {
+            // impulse<<<G, B, 0, process_stream>>>(d_grid, glm::ivec2(click.x, H - click.y), 4.0f);
+            point_source<<<G, B, 0, process_stream>>>(
+                d_grid,
+                glm::ivec2(click.x, H - click.y),
+                t*8.0f,
+                0.35f
+            );
+            check_kernel();
+        }
+
+        point_source<<<G, B, 0, process_stream>>>(
+            d_grid,
+            glm::ivec2(100, 100),
+            t*2.0f,
+            max(0.0f, 1.0f - t*0.5f)
+        );
+        check_kernel();
+
+        insert_walls<<<G, B, 0, process_stream>>>(d_grid, d_walls);
+        check_kernel();
+
+        step<<<G, B, 0, process_stream>>>(d_grid_next, d_grid, d_grid_prev);
+        check_kernel();
+
+        cudaStreamSynchronize(process_stream);
+        swap_buffers();
+
+        auto triosc = [] (float t, float f) {
+            t = abs(0.5f - glm::fract(t * f)) - 0.25f;
+            return t * 4.0f;
+        };
+            // float value = glm::mix(prev_amp, amp, static_cast<float>(i) / AudioBufferSize);
+
+        float amp = probe(d_grid, glm::ivec2(W, H) - glm::ivec2(100, 100));
+        amps.push_back(amp);
+
+        auto fade = [] (float f) {
+            f = glm::min(1.0f, glm::max(0.0f, f));
+            return glm::cos(f*pi)*-0.5f+0.5f;
+        };
+        for (int i = 0; i < AudioBufferSize; ++i) {
+            float* ampi = &amps[amps.size() - Amps - 1];
+            float value = glm::mix(ampi[i/AA - 1], ampi[(i/AA) % (Amps-1)], (i % AA) / float(AA));
+            buffer[i] = value
+                * fade(i * 4.0f / AudioBufferSize)
+                * fade((AudioBufferSize-i) * 4.0f / AudioBufferSize);
+        }
+
+        // pitch_shift(AudioBufferSize, buffer);
+        for (int i = 0; i < AudioBufferSize; ++i) {
+            buffer[i] = buffer[i]
+                * fade(i * 4.0f / AudioBufferSize)
+                * fade((AudioBufferSize-i) * 4.0f / AudioBufferSize);
+        }
+        prev_amp = amp;
+
+        start_sample += AudioBufferSize;
+        return buffer;
+    };
 
     jack_status_t status;
     auto client = jack_client_open("wavy_synth", JackNoStartServer, &status);
@@ -197,14 +366,14 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     assert(!status);
     auto input_port = jack_port_register(
         client,
-        "inputxx",
+        "input",
         JACK_DEFAULT_AUDIO_TYPE,
         JackPortIsInput,
         AudioBufferSize
     );
     auto output_port = jack_port_register(
         client,
-        "outputxx",
+        "output",
         JACK_DEFAULT_AUDIO_TYPE,
         JackPortIsOutput,
         AudioBufferSize
@@ -214,19 +383,20 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     struct Ports {
         jack_port_t* input;
         jack_port_t* output;
-        float* buffer;
+        decltype(simulate) simulaty;
     } ports {
         input_port,
         output_port,
-        buffer,
+        simulate,
     };
     auto process = [] (jack_nframes_t nframes, void* arg) -> int {
         assert(nframes == AudioBufferSize);
         auto ports = static_cast<Ports*>(arg);
         float* input = static_cast<float*>(jack_port_get_buffer(ports->input, AudioBufferSize));
         float* output = static_cast<float*>(jack_port_get_buffer(ports->output, AudioBufferSize));
+        float* buffer = ports->simulaty();
         for (int i = 0; i < AudioBufferSize; ++i) {
-            output[i] = ports->buffer[i];
+            output[i] = buffer[i];
         }
         return 0;
     };
@@ -234,74 +404,40 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     jack_activate(client);
 
     display(W, H, [&] (ClickEvent ev) {
-        auto time = steady_clock::now();
-        auto elapsed_time = time - start_time;
+        cudaStreamSynchronize(process_stream);
+        click = ev;
 
-        auto steps_todo = duration_cast<milliseconds>(
-            (elapsed_time - prev_step_time) * StepsPerSecond
-        ).count() / 1000;
-
-        // std::cout << "steps todo: " << steps_todo << std::endl;
-
-        for (int i = 0; i < steps_todo; ++i) {
-            auto t = steps / static_cast<float>(StepsPerSecond);
-
-            if (ev.clicked) {
-                impulse<<<G, B>>>(d_grid, glm::ivec2(ev.x, H - ev.y), 4.0f);
+        if (ev.clocked) {
+            auto wall_to = glm::ivec2(ev.x, H-ev.y);
+            if (wall_from != glm::ivec2{0, 0}) {
+                wall_line<<<G, B, 0, display_stream>>>(d_walls, wall_from, wall_to, 1);
                 check_kernel();
             }
-
-            if (ev.clocked) {
-                auto wall_to = glm::ivec2(ev.x, H-ev.y);
-                if (wall_from != glm::ivec2{0, 0}) {
-                    wall_line<<<G, B>>>(d_walls, wall_from, wall_to, 1); check_kernel();
-                    check_kernel();
-                }
-                wall_from = wall_to;
-            }
-
-            point_source<<<G, B>>>(d_grid, glm::ivec2(100, 100), t*2.0f, max(0.0f, 1.0f - t*0.5f));
-            check_kernel();
-
-            insert_walls<<<G, B>>>(d_grid, d_walls);
-            check_kernel();
-
-            step<<<G, B>>>(d_grid_next, d_grid, d_grid_prev);
-            check_kernel();
-
-            float amp = probe(d_grid, glm::ivec2(50, 50));
-            for (int i = 0; i < ProbeStepSize; ++i)
-                buffer[buffer_index++] = glm::mix(prev_amp, amp, static_cast<float>(i) / ProbeStepSize);
-            prev_amp = amp;
-
-            // flush
-            if (buffer_index == AudioBufferSize) {
-                // TODO: send buffer to jack
-                // std::cout << amp << std::endl;
-                buffer_index = 0;
-            }
-
-            swap_buffers();
-            ++steps;
+            wall_from = wall_to;
         }
 
-        // TODO: this might not be accurate
-        prev_step_time += duration_cast<milliseconds>(
-            1us * steps_todo * static_cast<int>(1000000.0f * SecondsPerStep)
-        );
+        if (ev.clear) {
+            check << cudaMemsetAsync(d_grid, 0, N * sizeof(float), display_stream);
+            check << cudaMemsetAsync(d_grid_prev, 0, N * sizeof(float), display_stream);
+        }
 
-        draw<<<G, B>>>(d_output, d_grid, d_walls);
+        draw<<<G, B, 0, display_stream>>>(d_output, d_grid, d_walls);
         check_kernel();
 
-        check << cudaMemcpy(h_output.data(), d_output, N * sizeof(glm::vec4), cudaMemcpyDeviceToHost);
+        check << cudaMemcpyAsync(h_output.data(), d_output, N * sizeof(glm::vec4), cudaMemcpyDeviceToHost, display_stream);
 
+        cudaStreamSynchronize(display_stream);
         return h_output.data();
     });
 
+    jack_client_close(client);
+    cudaStreamSynchronize(process_stream);
+    cudaStreamSynchronize(display_stream);
     check << cudaFree(d_output);
-
     check << cudaFree(d_grid);
     check << cudaFree(d_grid_next);
+    check << cudaStreamDestroy(process_stream);
+    check << cudaStreamDestroy(display_stream);
 
     return 0;
 }

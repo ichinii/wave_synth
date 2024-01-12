@@ -9,6 +9,8 @@ struct ClickEvent {
     bool clocked;
     int x;
     int y;
+    bool clear;
+    bool a, b, c, d;
 };
 
 using UpdateFn = std::function<glm::vec4*(ClickEvent)>;

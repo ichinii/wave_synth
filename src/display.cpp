@@ -195,7 +195,12 @@ void display(int width, int height, UpdateFn update) {
         glfwGetCursorPos(window, &mousex, &mousey);
         bool clicked = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
         bool clocked = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-        auto click_ev = ClickEvent { clicked, clocked, mousex, mousey };
+        bool clear = glfwGetKey(window, GLFW_KEY_C) == GLFW_PRESS;
+        bool aa = glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS;
+        bool ab = glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS;
+        bool ac = glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS;
+        bool ad = glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS;
+        auto click_ev = ClickEvent { clicked, clocked, mousex, mousey, clear, aa, ab, ac, ad };
 
         // draw the image using ray marching
         glm::vec4 *image = update(click_ev);
