@@ -15,8 +15,9 @@
 
 #include "display.h"
 
-std::map<int, int> key_states;
-float mouse_scroll_y = 0.0f;
+// global object for whole input state
+InputState input;
+glm::ivec2 viewport;
 
 static GLuint loadShaderFromSourceCode(GLenum type, const char* sourcecode, int length)
 {
@@ -97,7 +98,7 @@ static GLuint createProgram(std::vector<shader_load_data_t> shader_load_data)
 }
 
 void display(int width, int height, UpdateFn update) {
-    glm::ivec2 viewport { width, height };
+    viewport = glm::ivec2 { width, height };
 
     assert(glfwInit() == GLFW_TRUE);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -158,7 +159,7 @@ void display(int width, int height, UpdateFn update) {
 
         int value = action == GLFW_PRESS ? 1 : (action == GLFW_RELEASE ? -1 : 0);
         if (value != 0)
-            key_states.insert_or_assign(key, value);
+            input.keys.insert_or_assign(key, value);
     });
 
     glfwSetScrollCallback(window, [] (
@@ -166,13 +167,36 @@ void display(int width, int height, UpdateFn update) {
         [[maybe_unused]] double dx,
         [[maybe_unused]] double dy
     ) {
-        mouse_scroll_y = glm::clamp(mouse_scroll_y - static_cast<float>(dy), -10.0f, 10.0f);
+        input.mouse_scroll.x = dx;
+        input.mouse_scroll.y = dy;
     });
 
-    auto update_key_states = [] {
-        for (auto& [_, v] : key_states) {
+    glfwSetCursorPosCallback(window, [] (
+        [[maybe_unused]] GLFWwindow* window,
+        [[maybe_unused]] double xpos,
+        [[maybe_unused]] double ypos
+    ) {
+        input.mouse_pos.x = xpos;
+        input.mouse_pos.y = viewport.y - ypos;
+    });
+
+    glfwSetMouseButtonCallback(window, [] (
+        [[maybe_unused]] GLFWwindow* window,
+        [[maybe_unused]] int button,
+        [[maybe_unused]] int action,
+        [[maybe_unused]] int mods
+    ) {
+        int value = action == GLFW_PRESS ? 1 : (action == GLFW_RELEASE ? -1 : 0);
+        input.mouse.insert_or_assign(button, value);
+    });
+
+
+    auto update_input = [] {
+        for (auto& [_, v] : input.keys)
             v += glm::sign(v);
-        }
+
+        for (auto& [_, v] : input.mouse)
+            v += glm::sign(v);
     };
 
     using namespace std::chrono;
@@ -183,27 +207,16 @@ void display(int width, int height, UpdateFn update) {
     while (!glfwWindowShouldClose(window)) {
         // handle input
         glfwPollEvents();
-        update_key_states();
         [[maybe_unused]] glm::dvec2 mouse;
         glfwGetCursorPos(window, &mouse.x, &mouse.y);
 
         glfwGetWindowSize(window, &viewport.x, &viewport.y);
         glViewport(0, 0, viewport.x, viewport.y);
 
-        // click event
-        double mousex, mousey;
-        glfwGetCursorPos(window, &mousex, &mousey);
-        bool clicked = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-        bool clocked = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-        bool clear = glfwGetKey(window, GLFW_KEY_C) == GLFW_PRESS;
-        bool aa = glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS;
-        bool ab = glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS;
-        bool ac = glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS;
-        bool ad = glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS;
-        auto click_ev = ClickEvent { clicked, clocked, mousex, mousey, clear, aa, ab, ac, ad };
-
         // draw the image using ray marching
-        glm::vec4 *image = update(click_ev);
+        glm::vec4 *image = update(input);
+        update_input();
+
         glBindTexture(GL_TEXTURE_2D, tex);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, viewport.x, viewport.y, 0, GL_RGBA, GL_FLOAT, image);
 

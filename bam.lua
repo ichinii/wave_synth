@@ -30,6 +30,11 @@ function read_dep(filename)
     end
 end
 
+function use_arch(s, arch)
+    print("note: using arch '".."'. remove this if not needed")
+    table.insert(s.cu.flags_compile, arch)
+end
+
 AddTool(function(s)
     s.cc.flags:Add("-Wall")
     s.cc.flags:Add("-Wextra")
@@ -41,6 +46,7 @@ AddTool(function(s)
     table.insert(s.cu.flags_compile, "--std=c++20")
     table.insert(s.cu.flags_compile, "--expt-relaxed-constexpr")
     table.insert(s.cu.flags_compile, "--extended-lambda")
+    use_arch(s, "-arch=sm_50")
     -- table.insert(s.cu.flags_compile, "--ptxas-options=-v")
     s.cu.flags_link = {}
     table.insert(s.cu.flags_link, "GL")
