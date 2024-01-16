@@ -180,6 +180,10 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
             init_walls(d_walls, display_stream);
         }
 
+        if (!jack) {
+            process(nullptr, nullptr);
+        }
+
         draw<<<G, B, 0, display_stream>>>(d_output, d_grid, d_walls, events.wall);
         check_kernel();
 
