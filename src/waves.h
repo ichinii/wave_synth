@@ -38,7 +38,7 @@ void step(float* dst, float* src, float* prev_src) {
     dst[gid] = value * damping;
 }
 
-// *************** sources ***************
+// *************** sources and sinks ***************
 
 __global__
 void point_source(float* dst, glm::ivec2 p, float t, float amp) {
@@ -54,6 +54,13 @@ void impulse(float* dst, glm::ivec2 p, float amp = 1.0f) {
     auto coord = index_to_coord(gid);
     if (p == coord)
         dst[gid] = amp;
+}
+
+float sink(float* data, glm::ivec2 coord, cudaStream_t stream = 0) {
+    float value;
+    data += coord.x + coord.y * W;
+    cudaMemcpyAsync(&value, data, sizeof(float), cudaMemcpyDeviceToHost, stream);
+    return value;
 }
 
 // *************** walls ***************
@@ -81,30 +88,4 @@ void insert_walls(float* dst, bool* walls) {
     int gid = threadIdx.x + blockIdx.x*blockDim.x;
     if (walls[gid])
         dst[gid] = 0.0f;
-}
-
-// *************** draw ***************
-
-__global__
-void draw(glm::vec4* output, float* data, bool* walls, Events::Wall wall_event) {
-    int gid = threadIdx.x + blockIdx.x*blockDim.x;
-    float value = data[gid];
-    float high = max(0.0f, value);
-    float low = max(0.0f, -value);
-    float overflow = max(0.0f, abs(value) - 1.0f);
-    glm::vec3 c = glm::vec3(high, low, overflow);
-
-    if (walls[gid])
-        c = glm::vec3(1);
-
-    if (wall_event.drawing) {
-        auto coord = index_to_coord(gid);
-        bool inside = sd_segment(coord, wall_event.to, wall_event.hover, 7);
-        if (inside)
-            c += 0.01f;
-    }
-
-    c = glm::pow(glm::vec3(c), glm::vec3(1.0f/2.2f));
-
-    output[gid] = glm::vec4(c, 1.0f);
 }

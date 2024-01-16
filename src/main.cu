@@ -1,6 +1,5 @@
 #include <iostream>
 #include <vector>
-#include <chrono>
 
 #include <glm/glm.hpp>
 
@@ -8,56 +7,7 @@
 #include "misc.h"
 #include "waves.h"
 #include "audio.h"
-
-Events input_state_to_events(const InputState& input, Events events) {
-    events.clear_waves = key_just_pressed(input, GLFW_KEY_C);
-    events.clear_walls = key_just_pressed(input, GLFW_KEY_V);
-
-    {
-        float freq = 0.0f;
-        freq = key_pressed(input, GLFW_KEY_1) ? 1.0f : freq;
-        freq = key_pressed(input, GLFW_KEY_2) ? 2.0f : freq;
-        freq = key_pressed(input, GLFW_KEY_3) ? 3.0f : freq;
-        freq = key_pressed(input, GLFW_KEY_4) ? 4.0f : freq;
-        freq = key_pressed(input, GLFW_KEY_5) ? 5.0f : freq;
-        freq = key_pressed(input, GLFW_KEY_6) ? 6.0f : freq;
-        freq = key_pressed(input, GLFW_KEY_7) ? 7.0f : freq;
-        freq = key_pressed(input, GLFW_KEY_8) ? 8.0f : freq;
-        freq = key_pressed(input, GLFW_KEY_9) ? 9.0f : freq;
-
-        events.point_source.active = freq > 0.0f;
-        events.point_source.freq = freq;
-        events.point_source.pos = input.mouse_pos;
-    }
-
-    {
-        bool pressed = button_pressed(input, GLFW_MOUSE_BUTTON_LEFT);
-        bool drawing = events.wall.drawing || pressed;
-        bool place_wall = events.wall.drawing && pressed;
-
-        bool reset = button_pressed(input, GLFW_MOUSE_BUTTON_RIGHT);
-        place_wall = !reset && place_wall;
-        drawing = !reset && drawing;
-
-        if (pressed) {
-            events.wall.from = events.wall.to;
-            events.wall.to = glm::vec2(input.mouse_pos);
-        }
-
-        events.wall.hover = glm::vec2(input.mouse_pos);
-        events.wall.place_wall = place_wall;
-        events.wall.drawing = drawing;
-    }
-
-    return events;
-}
-
-float probe(float* data, glm::ivec2 coord, cudaStream_t stream = 0) {
-    float value;
-    data += coord.x + coord.y * W;
-    cudaMemcpyAsync(&value, data, sizeof(float), cudaMemcpyDeviceToHost, stream);
-    return value;
-}
+#include "draw.h"
 
 void init_walls(bool* d_walls, cudaStream_t stream) {
     int w = W-1;
@@ -68,16 +18,12 @@ void init_walls(bool* d_walls, cudaStream_t stream) {
     wall_line<<<G, B, 0, stream>>>(d_walls, glm::ivec2(0, h), glm::ivec2(0, 0), 1); check_kernel();
 }
 
-void event_source(float* d_grid, float t, const Events& events, cudaStream_t stream) {
-    auto active = events.point_source.active;
-    auto freq = events.point_source.freq;
-    auto pos = events.point_source.pos;
-
-    if (active) {
+void process_point_source_event(float* d_grid, float t, Events::PointSource ev, cudaStream_t stream) {
+    if (ev.active) {
         point_source<<<G, B, 0, stream>>>(
             d_grid,
-            pos,
-            t * freq,
+            ev.pos,
+            t * ev.freq,
             0.4f
         );
         check_kernel();
@@ -92,10 +38,10 @@ void event_source(float* d_grid, float t, const Events& events, cudaStream_t str
     check_kernel();
 }
 
-void event_wall(bool* d_walls, const Events& events, cudaStream_t stream) {
-    if (events.wall.place_wall) {
-        auto from = events.wall.from;
-        auto to = events.wall.to;
+void process_wall_event(bool* d_walls, Events::Wall ev, cudaStream_t stream) {
+    if (ev.place) {
+        auto from = ev.from;
+        auto to = ev.to;
         wall_line<<<G, B, 0, stream>>>(d_walls, from, to, 1);
         check_kernel();
     }
@@ -147,8 +93,8 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
 
         float t = static_cast<float>(start_sample) / AudioSampleRate;
 
-        event_source(d_grid, t, events, process_stream);
-        event_wall(d_walls, events, process_stream);
+        process_point_source_event(d_grid, t, events.point_source, process_stream);
+        process_wall_event(d_walls, events.wall, process_stream);
 
         insert_walls<<<G, B, 0, process_stream>>>(d_grid, d_walls);
         check_kernel();

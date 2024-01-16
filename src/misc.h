@@ -41,22 +41,3 @@ struct ErrorPrinter {
 };
 #define check ErrorPrinter{__LINE__}
 #define check_kernel ErrorPrinter{__LINE__} << cudaGetLastError
-
-struct Events {
-    bool clear_waves = false;
-    bool clear_walls = false;
-
-    struct PointSource {
-        float active = false;
-        float freq;
-        glm::vec2 pos;
-    } point_source;
-
-    struct Wall {
-        bool place_wall = false;
-        bool drawing = false;
-        glm::vec2 from;
-        glm::vec2 to;
-        glm::vec2 hover;
-    } wall;
-};
