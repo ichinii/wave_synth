@@ -7,6 +7,8 @@
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 
+#include "common.h"
+
 // *************** input ***************
 
 using KeyState = std::map<int, int>;
@@ -80,7 +82,7 @@ inline Events input_state_to_events(const InputState& input, Events events) {
         freq = key_pressed(input, GLFW_KEY_9) ? 9.0f : freq;
 
         events.point_source.active = freq > 0.0f;
-        events.point_source.freq = freq;
+        events.point_source.freq = freq * ProcessedSamplesPerAudioBuffer;
         events.point_source.pos = input.mouse_pos;
     }
 
@@ -89,7 +91,8 @@ inline Events input_state_to_events(const InputState& input, Events events) {
         bool drawing = events.wall.drawing || pressed;
         bool place = events.wall.drawing && pressed;
 
-        bool reset = button_pressed(input, GLFW_MOUSE_BUTTON_RIGHT);
+        bool reset = button_pressed(input, GLFW_MOUSE_BUTTON_RIGHT)
+            || events.point_source.active;
         place = !reset && place;
         drawing = !reset && drawing;
 

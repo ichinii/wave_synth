@@ -9,6 +9,13 @@ glm::ivec2 index_to_coord(int index) {
     return glm::ivec2(index % W, index / W);
 }
 
+inline void cycle_swap(float*& a, float*& b, float*& c) {
+    auto tmp = c;
+    c = b;
+    b = a;
+    a = tmp;
+}
+
 // *************** simulate waves ***************
 
 __global__
@@ -34,7 +41,7 @@ void step(float* dst, float* src, float* prev_src) {
     value += 2.0f*self - prev_self;
 
     // const float damping = 1.0f;
-    const float damping = 0.99f;
+    const float damping = 0.999f;
     dst[gid] = value * damping;
 }
 

@@ -46,6 +46,7 @@ AddTool(function(s)
     table.insert(s.cu.flags_compile, "--std=c++20")
     table.insert(s.cu.flags_compile, "--expt-relaxed-constexpr")
     table.insert(s.cu.flags_compile, "--extended-lambda")
+    table.insert(s.cu.flags_compile, "-I ~/repos/signalsmith-stretch")
     use_arch(s, "-arch=sm_50")
     -- table.insert(s.cu.flags_compile, "--ptxas-options=-v")
     s.cu.flags_link = {}
@@ -67,7 +68,7 @@ AddTool(function(s)
         local dep = PathJoin(dep_dir, PathBase(output))..".dep"
         output = PathJoin(obj_dir, PathBase(output))..".o"
 
-        local flags = table.concat(TableFlatten({s.cu.flags_compile, s.cu.flags}), " ")
+        local flags = table.concat(TableFlatten({s.cu.flags, s.cu.flags_compile, s.cu.flags}), " ")
         AddJob(
             output,
             "nvcc "..input,
@@ -100,7 +101,7 @@ AddTool(function(s)
 end)
 
 function link(s, output, inputs)
-    local flags = table.concat(TableFlatten({s.cu.flags, s.cu.flags_compile, s.cu.flags, s.cu.flags_cxx}), " ")
+    local flags = table.concat(TableFlatten({s.cu.flags, s.cu.flags_compile, s.cu.flags}), " ")
     local link_flags = ""
     for _, v in ipairs(s.cu.flags_link) do
         link_flags = link_flags.." -l"..v

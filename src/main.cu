@@ -2,12 +2,25 @@
 #include <vector>
 
 #include <glm/glm.hpp>
+#include <signalsmith-stretch.h>
 
 #include "display.h"
 #include "misc.h"
 #include "waves.h"
 #include "audio.h"
 #include "draw.h"
+
+void pitch_shift(float* dst, float* src, float factor) {
+    signalsmith::stretch::SignalsmithStretch<float> stretch;
+
+    int channels = 1;
+    stretch.presetDefault(channels, AudioSampleRate);
+    stretch.setTransposeFactor(16);
+
+    float** input = &src;
+    float** output = &dst;
+    stretch.process(input, AudioBufferSize, output, AudioBufferSize);
+}
 
 void init_walls(bool* d_walls, cudaStream_t stream) {
     int w = W-1;
@@ -68,19 +81,13 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     glm::vec4* d_output;
     check << cudaMalloc(&d_output, N * sizeof(glm::vec4));
 
-    auto swap_buffers = [&] {
-        auto tmp = d_grid_prev;
-        d_grid_prev = d_grid;
-        d_grid = d_grid_next;
-        d_grid_next = tmp;
-        return d_grid; // return the results buffer
-    };
-
     cudaStream_t process_stream;
     cudaStream_t display_stream;
     cudaStreamCreate(&process_stream);
     cudaStreamCreate(&display_stream);
     Events events;
+
+    auto buffer = std::vector<float>(0, AudioBufferSize);
 
     auto process = [
         &,
@@ -91,21 +98,30 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     ) mutable -> void {
         cudaStreamSynchronize(display_stream);
 
-        float t = static_cast<float>(start_sample) / AudioSampleRate;
+        float amps[ProcessedSamplesPerAudioBuffer];
 
-        process_point_source_event(d_grid, t, events.point_source, process_stream);
-        process_wall_event(d_walls, events.wall, process_stream);
+        for (int i = 0; i < ProcessedSamplesPerAudioBuffer; ++i) {
+            float t = static_cast<float>(start_sample) / AudioSampleRate;
+            process_point_source_event(d_grid, t, events.point_source, process_stream);
+            process_wall_event(d_walls, events.wall, process_stream);
 
-        insert_walls<<<G, B, 0, process_stream>>>(d_grid, d_walls);
-        check_kernel();
+            insert_walls<<<G, B, 0, process_stream>>>(d_grid, d_walls);
+            check_kernel();
 
-        step<<<G, B, 0, process_stream>>>(d_grid_next, d_grid, d_grid_prev);
-        check_kernel();
+            step<<<G, B, 0, process_stream>>>(d_grid_next, d_grid, d_grid_prev);
+            cycle_swap(d_grid_next, d_grid, d_grid_prev);
+
+            amps[i] = sink(d_grid, glm::ivec2(), process_stream);
+
+            start_sample += AudioBufferSize / ProcessedSamplesPerAudioBuffer;
+        }
+
+        if (output) {
+            buffer.insert(buffer.end(), amps, amps + ProcessedSamplesPerAudioBuffer);
+            pitch_shift(output, &buffer[buffer.size() - AudioBufferSize], 1.0f);
+        }
 
         cudaStreamSynchronize(process_stream);
-        swap_buffers();
-
-        start_sample += AudioBufferSize;
     };
 
     // run jack client on separate thread
@@ -119,6 +135,9 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
         if (events.clear_waves) {
             check << cudaMemsetAsync(d_grid, 0, N * sizeof(float), display_stream);
             check << cudaMemsetAsync(d_grid_prev, 0, N * sizeof(float), display_stream);
+
+            // TODO: remove this when we have propper thread sync
+            check << cudaMemsetAsync(d_grid_next, 0, N * sizeof(float), display_stream);
         }
 
         if (events.clear_walls) {

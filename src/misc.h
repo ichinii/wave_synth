@@ -1,15 +1,13 @@
 #pragma once
 
+#include "common.h"
+
 constexpr int W = 512;
 constexpr int H = 512;
 constexpr int N = W*H;
 
 constexpr int B = 128;
 constexpr int G = N/B;
-
-constexpr int AudioSampleRate = 44100;
-constexpr int AudioBufferSize = 512;
-// static_assert(AudioSampleRate % AudioBufferSize == 0);
 
 #define pi 3.14159265358979323844f
 #define pi2 (pi*2.0f)
